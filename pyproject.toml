@@ -7,7 +7,7 @@ name = "bounty-harness"
 version = "0.1.0"
 description = "Scoped workflow runner for authorized external-surface assessments"
 requires-python = ">=3.11"
-dependencies = ["PyYAML>=6,<7"]
+dependencies = ["PyYAML>=6,<7", "openai>=1.66,<3", "jsonschema>=4,<5"]
 
 [project.scripts]
 bounty = "bounty.cli:main"
@@ -16,7 +16,7 @@ bounty = "bounty.cli:main"
 include = ["bounty*"]
 
 [tool.setuptools.package-data]
-bounty = ["trusted.json", "adapters.yaml"]
+bounty = ["trusted.json", "adapters.yaml", "agent_tools.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

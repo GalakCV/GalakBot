@@ -6,8 +6,20 @@ import re
 import sqlite3
 import time
 import uuid
+import threading
+from functools import wraps
 from dataclasses import dataclass
 from pathlib import Path
+
+_TRACE_LOCK = threading.RLock()
+
+
+def synchronized(method):
+    @wraps(method)
+    def invoke(self, *args, **kwargs):
+        with self.lock:
+            return method(self, *args, **kwargs)
+    return invoke
 
 
 class Refused(RuntimeError):
@@ -85,7 +97,7 @@ class RunContext:
         write_json(self.root / "context.json", self.config)
 
     def trace(self, event, **data):
-        with (self.root / "traces/events.jsonl").open("a", encoding="utf-8") as stream:
+        with _TRACE_LOCK, (self.root / "traces/events.jsonl").open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(redact(dict(time=time.time(), event=event, **data))) + "\n")
 
 
@@ -116,7 +128,8 @@ class Blackboard:
 
     def finding(self, skill, phase, host, title, evidence, details, state="hypothesis"):
         key = hashlib.sha256(json.dumps([skill, phase, host, title]).encode()).hexdigest()
-        self.db.execute("INSERT OR IGNORE INTO findings VALUES (?,?,?,?,?,?,?,?)",
+        self.db.execute("""INSERT INTO findings VALUES (?,?,?,?,?,?,?,?)
+          ON CONFLICT(natural_key) DO UPDATE SET state=excluded.state,evidence=excluded.evidence,details=excluded.details""",
                         (key, skill, phase, host, redact(title), state, evidence, json.dumps(redact(details))))
         self.db.commit()
 
@@ -131,24 +144,34 @@ class Blackboard:
 
 class Breaker:
     def __init__(self, ctx, *, consecutive=3, rate_limit=3, error_rate=0.6, window=10):
+        self.lock = threading.RLock()
+        self.rate_lock = threading.Lock()
+        self.next_times = {}
+        self.reservations = {}
+        self.reservation_id = 0
+        self.invalid_attempts = 0
         self.ctx, self.started = ctx, time.monotonic()
         self.consecutive_limit, self.rate_limit = consecutive, rate_limit
         self.error_rate, self.window = error_rate, window
         self.errors = self.throttles = self.calls = 0
         self.history = []
+        self.status_history = []
         self.cost = 0.0
         self.reason = None
 
+    @synchronized
     def snapshot(self):
         return dict(reason=self.reason, calls=self.calls, consecutive_errors=self.errors,
-                    throttles=self.throttles, cost=self.cost, elapsed=time.monotonic() - self.started)
+                    throttles=self.throttles, cost=self.cost, reserved_cost=sum(self.reservations.values()), elapsed=time.monotonic() - self.started)
 
+    @synchronized
     def trip(self, reason):
         self.reason = self.reason or reason
         self.ctx.trace("breaker.trip", **self.snapshot())
         write_json(self.ctx.root / "breaker.json", self.snapshot())
         raise Refused(self.reason)
 
+    @synchronized
     def check(self):
         if self.reason:
             raise Refused(self.reason)
@@ -160,18 +183,51 @@ class Breaker:
         if self.cost > budgets["cost"]:
             self.trip("Cost budget exceeded")
 
+    @synchronized
     def outcome(self, ok, status=None):
         self.calls += 1
+        self._record(ok, status)
+
+    @synchronized
+    def reserve(self, cost=0.0):
+        self.check()
+        if self.cost + sum(self.reservations.values()) + cost > self.ctx.config["budgets"]["cost"]:
+            self.trip("Cost budget cannot cover next LLM call; configure --cost-budget")
+        self.calls += 1
+        self.reservation_id += 1
+        self.reservations[self.reservation_id] = cost
+        return self.reservation_id
+
+    @synchronized
+    def finish(self, reservation, ok, status=None, cost=0.0):
+        if reservation not in self.reservations:
+            raise Refused("Unknown budget reservation")
+        self.reservations.pop(reservation)
+        self.cost += cost
+        self._record(ok, status)
+        if self.cost > self.ctx.config["budgets"]["cost"]:
+            self.trip("Cost budget exceeded")
+
+    def _record(self, ok, status=None):
         self.errors = 0 if ok else self.errors + 1
         self.history = (self.history + [not ok])[-self.window:]
         self.throttles = self.throttles + 1 if status == 429 else 0
+        self.status_history = (self.status_history + [status])[-self.window:]
         self.ctx.trace("tool.outcome", ok=ok, status=status, breaker=self.snapshot())
-        if self.throttles >= self.rate_limit:
+        if self.throttles >= self.rate_limit or self.status_history.count(429) >= self.rate_limit:
             self.trip("Repeated HTTP 429")
         if self.errors >= self.consecutive_limit:
             self.trip("Consecutive tool errors")
         if len(self.history) == self.window and sum(self.history) / len(self.history) >= self.error_rate:
             self.trip("High tool error rate")
+
+    @synchronized
+    def invalid(self, reason):
+        self.invalid_attempts += 1
+        self.ctx.trace("gate.refused", reason=reason, invalid_attempts=self.invalid_attempts)
+        self.outcome(False)
+        if self.invalid_attempts >= 3:
+            self.trip("Repeated invalid tool arguments")
 
 
 def import_file(path):

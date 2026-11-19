@@ -13,7 +13,9 @@ class NoRedirect(HTTPRedirectHandler):
 def main():
     opener = build_opener(ProxyHandler({}), NoRedirect())
     try:
-        response = opener.open(Request(sys.argv[1], headers={"User-Agent": "BountyHarness/0.1"}), timeout=10)
+        timeout = float(sys.argv[2]) if len(sys.argv) > 2 else 10
+        user_agent = sys.argv[3] if len(sys.argv) > 3 else "BountyHarness/0.1"
+        response = opener.open(Request(sys.argv[1], headers={"User-Agent": user_agent}), timeout=timeout)
     except HTTPError as error:
         response = error
     with response:

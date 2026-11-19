@@ -6,13 +6,95 @@ Não contém auditoria de código, SAST ou varredura de repositórios.
 
 ## Começando
 
+### Milestone 5: agentes DeepSeek
+
+O CLI seleciona automaticamente a camada de agentes quando `DEEPSEEK_API_KEY` está
+no ambiente. A chave não é lida de arquivos nem gravada no contexto, nas evidências
+ou nos traces. Sem chave, o plano determinístico continua disponível.
+
+```powershell
+python -m pip install -e .
+$env:BOUNTY_SKILLS = "$PWD/.external/G-Skills"
+# Defina DEEPSEEK_API_KEY no ambiente da sua sessão, sem colocá-la no repositório.
+python -m bounty recon --target demo --cost-budget 1 --workers 4
+python -m bounty show --target demo
+python -m bounty explore --target demo --skill api-testing --host api.example.com --i-am-authorized
+python -m bounty report --target demo
+```
+
+O alvo `demo` precisa ter sido inicializado pelos comandos abaixo. Se ele usa
+fixture, as ferramentas continuam offline, mas **o modelo utiliza a API e créditos
+reais quando a chave está definida**. Os testes usam clientes injetados, sem chave
+real nem créditos. Os alvos existentes têm orçamento de custo zero: forneça
+`--cost-budget` no recon antes de habilitar o modelo. O valor é em USD e a reserva
+de custo é compartilhada atomicamente entre os agentes.
+
+| Papel | Modelo padrão | Configuração |
+|---|---|---|
+| Captain | `deepseek-reasoner` | `DEEPSEEK_CAPTAIN_MODEL` |
+| Especialistas de fase/host | modelo do Captain | `DEEPSEEK_WORKER_MODEL` |
+| Triager independente | `deepseek-chat` | `DEEPSEEK_TRIAGER_MODEL` |
+
+`DEEPSEEK_BASE_URL` configura o endpoint HTTPS (padrão `https://api.deepseek.com`).
+Os IDs pedidos no milestone são os padrões; podem ser substituídos conforme os
+modelos disponíveis na conta. O Captain escolhe ferramentas e argumentos, observa
+o resultado, ajusta a estratégia e delega tarefas a até quatro especialistas LLM
+concorrentes, em profundidade 1. Cada especialista recebe somente sua card/runbook.
+Um especialista não pode delegar a outro. Scripts upstream continuam disponíveis
+pela função `run_phase`; suas dependências são verificadas e scripts com arquivos
+compartilhados são serializados. Chamadas diretas aos tools permanecem concorrentes.
+
+O modelo recebe envelopes de flags, taxas, retries, profundidade e arquivos.
+Argumentos inválidos retornam um erro corrigível; abuso repetido ou tentativa fora
+do escopo aciona o breaker. Workers compartilham orçamento e limites de taxa.
+O adapter `katana` é um crawler GET limitado pelo broker (até 20 páginas, depth 3,
+mesmo host, sem redirects), não uma execução irrestrita do binário upstream.
+
+O Triager usa JSON validado com `state`, `confidence`, `rationale` e `next_step`.
+Estados: `true_positive`, `false_positive`, `needs_review`. Evidência de fixture ou
+ausência de observação nunca pode ser promovida a `true_positive`. Cada candidato
+precisa citar uma evidência produzida pelo próprio worker; a avaliação é feita por
+uma chamada LLM separada. Sem chave, a classificação segue como `hypothesis`.
+
+Timeout/retries: `DEEPSEEK_TIMEOUT` (30s), `DEEPSEEK_MAX_RETRIES` (2),
+`DEEPSEEK_MAX_OUTPUT_TOKENS` (2048). O SDK não faz retries adicionais ocultos.
+Custos estimados por milhão: `DEEPSEEK_INPUT_USD_PER_MILLION`,
+`DEEPSEEK_CACHED_INPUT_USD_PER_MILLION`, `DEEPSEEK_OUTPUT_USD_PER_MILLION`.
+Os padrões são estimativas conservadoras configuráveis, não uma cotação garantida.
+Cache hit/miss e custo observado ficam nos traces. O prefixo estável (instruções e
+card) vem antes do slice variável do blackboard, seguindo o
+[cache por prefixo do DeepSeek](https://api-docs.deepseek.com/guides/kv_cache/).
+
+### Replay
+
+Os traces registram decisões operacionais, chamadas e respostas redigidas por
+agente, sem gravar `reasoning_content`. Esse campo fica somente na memória para a
+continuação do protocolo de [tool calling](https://api-docs.deepseek.com/guides/tool_calls/).
+`temperature=0` é enviado, mas não promete determinismo de amostragem: o provedor
+[pode ignorá-lo em thinking mode](https://api-docs.deepseek.com/guides/thinking_mode/).
+O replay reutiliza as respostas registradas, valida o hash do pedido público e
+interrompe se contexto ou observações divergirem.
+
+```powershell
+# Alvo novo, mesmo escopo/fixture e blackboard inicial da gravação.
+python -m bounty init --target replay-demo --scope examples/scope.json --fixture examples/fixture.json
+python -m bounty recon --target replay-demo --cost-budget 1 --replay runs/demo/traces/events.jsonl
+```
+
+Replay dispensa chave e recusa alvos live. Ele reproduz escolhas contra fixtures,
+não promete que um alvo real continuará retornando a mesma resposta. Traces com
+várias campanhas usam a última, ou a escolhida por `--replay-campaign <id>`. O relatório
+inclui o caminho escolhido pelos agentes e os veredictos do Triager.
+
+### Fluxo determinístico e verificação offline
+
 No PowerShell, a partir desta pasta:
 
 ```powershell
 python -m pip install -e .
 # Se o clone ainda não existir:
 git clone https://github.com/GalakCV/G-Skills.git .external/G-Skills
-git -C .external/G-Skills checkout 0cea363af3f1c0ca2414cc777c53dc4d08d3fa69
+git -C .external/G-Skills checkout 178cccf450791adfb2be58fe92bb674d6ff6f53d
 $env:BOUNTY_SKILLS = "$PWD/.external/G-Skills"
 
 # Milestone 1: script http-probe real, respostas locais controladas.
@@ -121,7 +203,7 @@ SO, confira o PID em `campaign.lock` antes de remover somente esse arquivo. Nunc
 breaker registra motivo e orçamento em `breaker.json`.
 
 Budgets em `context.json`: segundos, iterações e custo; taxas HTTP/DNS separadas.
-Não há chamadas a modelos nem custo de tokens neste backend determinístico.
+Sem chave, não há chamadas a modelos nem custo de tokens.
 Breaker cobre erros consecutivos, taxa de erros em janela, 429 repetidos, escopo
 e orçamento. Backoff não repete automaticamente uma requisição 429. Hosts sem
 resposta continuam como `dead`, conforme a saída da skill.
@@ -136,8 +218,8 @@ resposta continuam como `dead`, conforme a saída da skill.
 - Specialists: `bounty.specialists`, com captain e triager separados.
 - Relatórios: `bounty.reports`; Markdown é o sink padrão.
 
-Captain é um planejador determinístico de DAG com um worker, profundidade 1.
-Triager nunca transforma saída de detector em confirmação de impacto. Traces
+Sem chave, Captain é um planejador determinístico de DAG. Com chave, ele dirige
+ferramentas e especialistas LLM. Triager exige evidência para julgar impacto. Traces
 guardam decisões, justificativas operacionais, chamadas, gates e estado do breaker;
 não guardam raciocínio privado de modelos.
 
@@ -150,6 +232,11 @@ Fixture só aceita scripts revisados cujos hashes estão em `bounty/trusted.json
 não oferece sandbox de SO para código arbitrário no Windows. Atualizar skills
 exige revisão antes de atualizar hashes. Skills com contratos completos dispensam
 mudança no executor; novas capacidades de rede exigem adapter registrado e revisado.
+
+Hashes e snapshots de execução normalizam CRLF/LF. `.gitattributes` fixa LF em
+Python e shell nos dois repositórios. O workflow de CI executa as fixtures em Linux
+com Python 3.11 e 3.12. Novas skills podem declarar `tools` por fase; as permissões
+da ferramenta ainda precisam estar registradas na camada determinística.
 
 `AGENTS.md` e `skills/05-field-lessons.md` citados no pedido não estavam no workspace.
 Foram aplicados contratos, safety cards e lições disponíveis no G-Skills, incluindo
