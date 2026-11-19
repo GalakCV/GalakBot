@@ -1,0 +1,28 @@
+recon:
+  passive-enum:
+    deps: [subfinder, assetfinder, waybackurls, gau, curl]
+  active-discovery:
+    deps: [dnsx]
+  http-probe:
+    deps: [httpx]
+api-testing:
+  spec-recon:
+    args: ["{base_url}", "{run_dir}"]
+    deps: [curl]
+  auth-enforcement:
+    requires_input: approved_paths
+    args: ["{base_url}", "{approved_paths}"]
+cloud:
+  asset-fingerprint:
+    args: ["{hosts_file}"]
+    deps: [dnsx]
+  bucket-exposure:
+    args: ["{target_name}", "{run_dir}"]
+    deps: [curl]
+infra:
+  takeover:
+    args: ["{hosts_file}", "{skill_dir}/payloads/takeover-fingerprints.txt"]
+    deps: [dnsx]
+  tls:
+    args: ["{target}"]
+    deps: [openssl]

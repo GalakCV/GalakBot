@@ -1,0 +1,16 @@
+{
+  "api-testing/scripts/noauth_probe.sh": "2349a4f95192e85d93cbeae27a214deedcc8bc2c0137eeb6bd5b4f3d0fe98f86",
+  "api-testing/scripts/spec_fetch.sh": "892d8379bc03abb7fe5ab4a2f0169a37b81a3fec926adc4bc75fb55a6b99ddab",
+  "api-testing/scripts/spec_mine.py": "b3db6163acf372d9d9fc47a39ee92f513770326773d64e02a7345a0d08ebe424",
+  "cloud/scripts/bucket_check.sh": "4ff54733f8d178c7f99f6246da4baa5b1efa8a366939df4b5823f741b25a0da0",
+  "cloud/scripts/cloud_fingerprint.py": "73aa57dd4185af7d98e0439b6f729e42f6adf2aafd863deb2e5f9c0a94e3c12f",
+  "infra/scripts/takeover_check.py": "558d81b8cb14de9a142dfc45db08060b16ad1d754f3bf8bd8ee80c5a894419cd",
+  "infra/scripts/tls_check.sh": "3b65830a0f6911dc860ff977974dc21813f60c82d02f25cc810ed6e313f18dc1",
+  "recon/scripts/active_discovery.sh": "0cb05249732f0b40ee1e3d16d622f1b49235d692090d7209815045a845e6edb3",
+  "recon/scripts/http_probe.sh": "5d30d7a4f92f5efdfb58d9a62b165bec5d6b96f9169a190fe8124c4f633d589e",
+  "recon/scripts/passive_enum.sh": "4066e746d30d18988392df800181ed8e61e687df0376a03f8fc62e2c39ce4e0b",
+  "recon/scripts/scope_filter.py": "89d786577bef061a812eb5cb4614db0a74af25f928f17df465bd169837ad9f34",
+  "recon/scripts/surface_table.py": "cc2ba26904fee09a75f21c865d3877279e4e2be54a8e197856a47bcba04dd701",
+  "web-testing/scripts/csp_check.py": "5fcf138453fcabf235e0030c9ae532f03848ed80600b8d8222c647e8c255571c",
+  "web-testing/scripts/diff_probe.py": "331b50e2d6e1613e1227736644a34f293c59755e37ad3aae55b60e494c3d111f"
+}

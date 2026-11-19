@@ -1,0 +1,6 @@
+{
+  "repository": "https://github.com/GalakCV/G-Skills.git",
+  "revision": "0cea363af3f1c0ca2414cc777c53dc4d08d3fa69",
+  "local_path": ".external/G-Skills",
+  "loaded_families": ["recon", "web-testing", "api-testing", "cloud", "infra"]
+}

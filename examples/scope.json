@@ -1,0 +1,5 @@
+{
+  "seeds": ["demo.example.com", "api.example.com"],
+  "in_scope": ["*.example.com"],
+  "out_of_scope": ["private.example.com"]
+}

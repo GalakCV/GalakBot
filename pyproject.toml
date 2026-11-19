@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bounty-harness"
+version = "0.1.0"
+description = "Scoped workflow runner for authorized external-surface assessments"
+requires-python = ">=3.11"
+dependencies = ["PyYAML>=6,<7"]
+
+[project.scripts]
+bounty = "bounty.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["bounty*"]
+
+[tool.setuptools.package-data]
+bounty = ["trusted.json", "adapters.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

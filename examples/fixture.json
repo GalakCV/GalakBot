@@ -1,0 +1,6 @@
+{
+  "httpx": {
+    "demo.example.com": {"status_code": 200, "title": "Demo login", "tech": ["nginx"]},
+    "api.example.com": {"status_code": 403, "title": "API", "tech": []}
+  }
+}
