@@ -75,6 +75,7 @@ class Skill:
         return result
 
     def digest(self):
-        hashes = [(str(p.relative_to(self.root)), hashlib.sha256(p.read_bytes()).hexdigest())
+        from .portability import normalized_hash
+        hashes = [(str(p.relative_to(self.root)).replace("\\", "/"), normalized_hash(p))
                   for p in sorted(self.root.rglob("*")) if p.is_file() and "__pycache__" not in p.parts]
         return hashlib.sha256(json.dumps(hashes).encode()).hexdigest()

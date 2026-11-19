@@ -23,10 +23,6 @@ def register_tools(layer):
             else:
                 host = stdin.strip()
             host = layer.scope.require(host, layer.breaker)
-            expected = {"subfinder": ["-d", host, "-silent", "-all"],
-                        "assetfinder": ["--subs-only", host], "gau": ["--subs"], "waybackurls": []}[name]
-            if args != expected:
-                layer.breaker.trip("Unsupported arguments for " + name)
             if layer.fixture is not None:
                 layer.rate()
                 layer.breaker.outcome(True)
@@ -35,34 +31,40 @@ def register_tools(layer):
         return call
 
     def dnsx(args, stdin):
-        permitted = {"-l", "-rl", "-retry"}
-        options, i = {}, 0
-        while i < len(args):
-            if args[i] == "-silent":
-                i += 1
-            elif args[i] in permitted and i + 1 < len(args):
-                options[args[i]] = args[i + 1]
-                i += 2
-            else:
-                layer.breaker.trip("Unsupported dnsx arguments")
-        data = inside(layer.ctx.root, options["-l"]).read_text() if "-l" in options else stdin
+        from .policy import options as parse_options
+        options = parse_options(args)
+        data = inside(layer.ctx.root, options["-l"]).read_text() if "-l" in options else options.get("-d", stdin)
         hosts = [layer.scope.require(h, layer.breaker) for h in data.splitlines() if h.strip()]
         rows = []
         for host in dict.fromkeys(hosts):
             if layer.fixture is not None:
                 layer.rate("dns")
                 layer.breaker.outcome(True)
-                if host in layer.fixture.get("resolved", layer.fixture.get("httpx", {})):
+                adaptive = layer.fixture.get("dnsx_by_retry", {})
+                resolved = adaptive.get(options.get("-retry", "2"), layer.fixture.get("resolved", layer.fixture.get("httpx", {})))
+                if host in resolved:
                     rows.append(host)
             else:
-                result = layer.external("dnsx", ["-silent", "-rl", "1", "-retry", "2"], host + "\n", "dns")
+                chosen = []
+                i = 0
+                while i < len(args):
+                    if args[i] in {"-l", "-d"}:
+                        i += 2
+                    else:
+                        chosen.append(args[i])
+                        i += 1
+                result = layer.external("dnsx", chosen, host + "\n", "dns")
                 if result["code"]:
                     return result
-                rows.extend(layer.scope.require(line.split()[0], layer.breaker) for line in result["stdout"].splitlines() if line)
+                for line in result["stdout"].splitlines():
+                    if line:
+                        value = json.loads(line).get("host") if line.startswith("{") else line.split()[0]
+                        rows.append(layer.scope.require(value, layer.breaker))
         # Persist self-check and stop if a supposedly known-good set entirely fails.
         if "-l" not in options and hosts and not rows:
-            layer.breaker.trip("DNS self-check failed; verify resolvers before continuing")
-        return dict(code=0, stdout="\n".join(rows) + ("\n" if rows else ""))
+            layer.ctx.trace("dns.self_check", reliable=False, requested=hosts, resolved=[])
+            return dict(code=0, stdout="", warning="DNS self-check unreliable: no known hosts resolved; lower rate or adjust retry", reliable=False)
+        return dict(code=0, stdout="\n".join(rows) + ("\n" if rows else ""), reliable=True)
 
     def curl(args, stdin):
         urls = [a for a in args if a.startswith(("http://", "https://"))]
@@ -82,8 +84,8 @@ def register_tools(layer):
             layer.scope.require(url, layer.breaker)
             if not layer.ctx.config.get("explore_authorized"):
                 layer.breaker.trip("Target HTTP curl requires explore")
-        allowed_single = {"-sS"}
-        allowed_pairs = {"-m", "-A", "-o", "-w"}
+        allowed_single = {"-sS", "-s", "--silent"}
+        allowed_pairs = {"-m", "--max-time", "-A", "-o", "-w"}
         options, i = {}, 0
         while i < len(args):
             arg = args[i]
@@ -109,7 +111,7 @@ def register_tools(layer):
             layer.breaker.trip("Unsupported HTTP URL")
         if ct_seed is None:
             layer.scope.require(url, layer.breaker)
-            if layer.tier == "passive" or (layer.tier == "active-safe" and (parsed.path not in {"", "/"} or parsed.query)):
+            if layer.tier == "passive" or (layer.tier == "active-safe" and not getattr(layer, "crawl_mode", False) and (parsed.path not in {"", "/"} or parsed.query)):
                 layer.breaker.trip("HTTP request exceeds phase tier")
             if any(p in unquote(parsed.path).lower() for p in ("/iam/security-credentials", "/service-accounts/", "/identity/oauth2/token")):
                 layer.breaker.trip("Cloud credential retrieval is prohibited")
@@ -136,7 +138,7 @@ def register_tools(layer):
                 raise Refused("HTTP request failed") from None
         layer.breaker.outcome(record["status"] != 429, record["status"])
         if record["status"] == 429:
-            layer.next_call = time.monotonic() + min(2 ** layer.breaker.throttles, 30)
+            layer.backoff(min(2 ** layer.breaker.throttles, 30))
         return redact(record)
 
     def http_read(args, stdin):
@@ -163,9 +165,7 @@ def register_tools(layer):
         if not args:
             raise Refused("openssl subcommand required")
         if args[0] == "x509":
-            expected = ["x509", "-noout", "-subject", "-issuer", "-dates", "-ext", "subjectAltName"]
-            if args != expected:
-                layer.breaker.trip("Unsupported certificate inspection arguments")
+            pass  # Validated by the declarative certificate policy.
         elif args[0] == "s_client":
             if len(args) not in {5, 6} or args[1] != "-connect" or args[3] != "-servername":
                 layer.breaker.trip("Unsupported TLS arguments")
@@ -182,7 +182,45 @@ def register_tools(layer):
 
     for name in ("subfinder", "assetfinder", "gau", "waybackurls"):
         layer.registry[name] = passive(name)
-    layer.registry.update(dnsx=dnsx, curl=curl, openssl=openssl, **{"http-read": http_read, "dns-read": dns_read})
+    def crawl(args, stdin):
+        from html.parser import HTMLParser
+        from urllib.parse import urljoin
+        from .policy import options
+        config = options(args)
+        start = config["-u"]
+        if "://" not in start:
+            start = "https://" + start + "/"
+        original_host = layer.scope.require(start, layer.breaker)
+        class Links(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.links = []
+            def handle_starttag(self, tag, attrs):
+                if tag == "a":
+                    self.links.extend(v for k, v in attrs if k == "href" and v)
+        queue, seen, rows = [(start, 0)], set(), []
+        layer.crawl_mode = True
+        try:
+            while queue and len(rows) < int(config.get("-max-pages", 20)):
+                url, depth = queue.pop(0)
+                if url in seen:
+                    continue
+                seen.add(url)
+                result = read_http(url)
+                rows.append(dict(url=url, status=result["status"]))
+                if depth < int(config.get("-d", 1)):
+                    parser = Links()
+                    parser.feed(result.get("body", ""))
+                    for href in parser.links:
+                        link = urlsplit(urljoin(url, href))
+                        if link.scheme in {"http", "https"} and link.hostname == original_host and not link.query and layer.scope.allows(link.geturl()):
+                            queue.append((link._replace(fragment="").geturl(), depth + 1))
+        finally:
+            layer.crawl_mode = False
+        return dict(code=0, stdout="\n".join(json.dumps(r) for r in rows))
+
+    layer.registry.update(dnsx=dnsx, curl=curl, openssl=openssl, katana=crawl,
+                          **{"http-read": http_read, "dns-read": dns_read, "api-probe": http_read})
     # Trusted Python package plugins extend the tool layer, not agent-generated code.
     from importlib.metadata import entry_points
     for entry in entry_points(group="bounty.tools"):
@@ -207,7 +245,7 @@ def phase_arguments(executor, phase, host):
     if args is None:
         return None, "Missing executable argument contract; provide harness.yaml args"
     env = dict(skill.data.get("env", {}))
-    env.update(rate_http=ctx.config["rates"]["http"], rate_dns=ctx.config["rates"]["dns"])
+    env.update(rate_http=min(100, ctx.config["rates"]["http"]), rate_dns=min(100, ctx.config["rates"]["dns"]))
     env.update(ctx.config.get("env", {}))
     if executor.tools.fixture is not None:
         words = ctx.root / "work/fixture-dns.txt"

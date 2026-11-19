@@ -14,6 +14,7 @@ from functools import wraps
 
 from .core import Blackboard, Breaker, Refused, Scope, redact, write_json
 from .workflow import Skill, inside
+from .portability import normalized_hash, normalized_bytes, prepare_skill
 
 
 def bash_path():
@@ -77,7 +78,7 @@ def validate(ctx, skill, phases=None):
         for p in skill.root.rglob("*"):
             if p.is_file() and p.suffix in {".py", ".sh"}:
                 key = str(p.relative_to(skill.root.parent)).replace("\\", "/")
-                if pins.get(key) != hashlib.sha256(p.read_bytes()).hexdigest():
+                if pins.get(key) != normalized_hash(p):
                     raise Refused("Fixture runner refuses an unreviewed script: " + key)
     else:
         if sys.platform != "linux" or not shutil.which("bwrap"):
@@ -125,14 +126,36 @@ class ToolLayer:
         register_tools(self)
 
     def call(self, request):
+        from .policy import validate_request, InvalidArguments, TOOL_TIERS
         self.breaker.check()
         name = request["tool"]
         if self.tier == "passive" and name in {"httpx", "dnsx", "openssl", "http-read", "dns-read"}:
             self.breaker.trip("Active tool refused in passive phase")
         if name not in self.registry:
             self.breaker.trip("Unregistered tool: " + name)
+        try:
+            request = validate_request(self, request)
+        except InvalidArguments as error:
+            self.ctx.trace("tool.refused", tool=name, reason=str(error))
+            self.breaker.invalid(str(error))
+            raise
+        required = TOOL_TIERS.get(name, "active-intrusive")
+        if name == "curl" and any(a.startswith("https://crt.sh/?") for a in request["args"]):
+            required = "passive"
+        if required == "active-intrusive" and not self.ctx.config.get("explore_authorized"):
+            self.breaker.trip("Intrusive tool requires explore authorization")
+        if required == "active-intrusive" and self.tier != "active-intrusive":
+            self.breaker.trip("Tool exceeds phase tier")
         self.ctx.trace("tool.call", tool=name, args=request["args"], gates={"registered": True})
-        result = self.registry[name](request["args"], request.get("stdin", ""))
+        from .policy import options
+        self.rate_override = options(request["args"]).get("-rl")
+        try:
+            result = self.registry[name](request["args"], request.get("stdin", ""))
+        finally:
+            self.rate_override = None
+        for key in ("stdout", "stderr"):
+            if isinstance(result.get(key), str) and len(result[key]) > 65536:
+                result[key] = result[key][:65536] + "\n[output truncated]"
         return redact(result)
 
     def external(self, name, args, stdin="", category="http"):
@@ -148,12 +171,16 @@ class ToolLayer:
     def rate(self, category="http"):
         self.breaker.check()
         rate = float(self.ctx.config["rates"][category])
+        if getattr(self, "rate_override", None):
+            rate = min(rate, float(self.rate_override))
         if rate <= 0:
             raise Refused("Rate must be positive")
-        while time.monotonic() < self.next_call:
+        with self.breaker.rate_lock:
+            due = max(time.monotonic(), self.next_call, self.breaker.next_times.get(category, 0))
+            self.breaker.next_times[category] = due + 1 / rate
+        while time.monotonic() < due:
             self.breaker.check()
-            time.sleep(min(0.05, self.next_call - time.monotonic()))
-        self.next_call = time.monotonic() + 1 / rate
+            time.sleep(max(0, min(0.05, due - time.monotonic())))
 
     def httpx(self, args, stdin):
         # The skill requests a batch; the broker gates each individual root probe.
@@ -163,18 +190,16 @@ class ToolLayer:
         i = 0
         while i < len(args):
             flag = args[i]
-            if flag in {"-l", "-o", "-rl", "-t", "-timeout", "-retry"} and i + 1 < len(args):
+            if flag in {"-u", "-l", "-o", "-rl", "-t", "-timeout", "-retry", "-retries"} and i + 1 < len(args):
                 options[flag] = args[i + 1]
                 i += 2
             elif flag in allowed:
                 i += 1
             else:
                 self.breaker.trip("Disallowed httpx argument: " + flag)
-        if "-l" not in options or "-o" not in options:
-            raise Refused("httpx requires input and output paths")
-        source = inside(self.ctx.root, options["-l"])
-        dest = inside(self.ctx.root, options["-o"])
-        hosts = [self.scope.require(h, self.breaker) for h in source.read_text().splitlines() if h.strip()]
+        dest = inside(self.ctx.root, options["-o"]) if "-o" in options else None
+        source = inside(self.ctx.root, options["-l"]).read_text() if "-l" in options else options["-u"]
+        hosts = [self.scope.require(h, self.breaker) for h in source.splitlines() if h.strip()]
         rows = []
         failed = False
         for host in dict.fromkeys(hosts):
@@ -189,7 +214,8 @@ class ToolLayer:
             else:
                 cmd = [shutil.which("httpx"), "-u", "https://" + host + "/", "-silent", "-json",
                        "-sc", "-title", "-td", "-location", "-webserver", "-no-color", "-no-fallback",
-                       "-t", "1", "-timeout", "10", "-retries", "0", "-disable-update-check"]
+                       "-t", options.get("-t", "1"), "-timeout", options.get("-timeout", "10"),
+                       "-retries", options.get("-retry", options.get("-retries", "1")), "-rl", options.get("-rl", "1"), "-disable-update-check"]
                 result = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True,
                                         timeout=min(15, max(1, self.remaining())), env=self.clean_env())
                 if result.returncode:
@@ -201,18 +227,24 @@ class ToolLayer:
             status = rec.get("status_code") if rec else None
             self.breaker.outcome(status != 429, status)
             if status == 429:
-                self.next_call = time.monotonic() + min(2 ** self.breaker.throttles, 30)
+                self.backoff(min(2 ** self.breaker.throttles, 30))
             if rec:
                 rec = dict(rec, input=host)
                 if rec.get("url"):
                     self.scope.require(rec["url"], self.breaker)
                 rows.append(redact(rec))
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
-        return dict(stdout="", stderr="Tool errors occurred" if failed else "", code=int(failed))
+        output = "".join(json.dumps(r) + "\n" for r in rows)
+        if dest:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(output, encoding="utf-8")
+        return dict(stdout=output, stderr="Tool errors occurred" if failed else "", code=int(failed))
 
     def remaining(self):
         return self.ctx.config["budgets"]["seconds"] - (time.monotonic() - self.breaker.started)
+
+    def backoff(self, seconds, category="http"):
+        with self.breaker.rate_lock:
+            self.breaker.next_times[category] = max(self.breaker.next_times.get(category, 0), time.monotonic() + seconds)
 
     def clean_env(self):
         return {"PATH": os.environ.get("PATH", ""), "HOME": str(self.ctx.root / "work"),
@@ -233,8 +265,13 @@ class Executor:
         normalized_scope = dict(self.ctx.config["scope"])
         normalized_scope["seeds"] = [self.tools.scope.require(s, self.breaker) for s in normalized_scope["seeds"]]
         write_json(self.ctx.root / "scope.json", normalized_scope)
-        script = inside(self.skill.root, self.skill.root / (phase.get("run") or phase.get("script")))
         work = self.ctx.root / "work" / self.campaign / phase["id"]
+        skill_copy = prepare_skill(self.skill.root, work / "skills")
+        script = inside(skill_copy, skill_copy / (phase.get("run") or phase.get("script")))
+        for value in args:
+            candidate = Path(value)
+            if candidate.is_absolute() and candidate.suffix == ".txt" and candidate.is_file() and candidate.resolve().is_relative_to(self.ctx.root):
+                candidate.write_bytes(normalized_bytes(candidate.read_bytes()))
         spool = work / "spool"
         bin_dir = work / "bin"
         spool.mkdir(parents=True)
@@ -327,7 +364,7 @@ class Executor:
         self.ctx.config.pop("reason", None)
         self.ctx.save()
         try:
-            self.run_script(phase, [shell_path(self.ctx.root), str(self.ctx.config["rates"]["http"])])
+            self.run_script(phase, [shell_path(self.ctx.root), str(min(100, self.ctx.config["rates"]["http"]))])
             self.ingest_http()
             self.ctx.config["status"] = "complete"
         except (Exception, KeyboardInterrupt) as error:
@@ -463,6 +500,16 @@ def markdown_report(ctx):
         lines.extend(["", "## Findings requiring triage", ""])
         for row in board.rows("findings"):
             lines.append(f"- {row['title']} ({row['host']}): {row['state']}; evidence: {row['evidence']}")
+            verdict = json.loads(row["details"]).get("verdict")
+            if verdict:
+                lines.append(f"  Confidence: {verdict['confidence']}; {verdict['rationale']} Next: {verdict['next_step']}")
+        trace = ctx.root / "traces/events.jsonl"
+        if trace.exists():
+            lines.extend(["", "## Agent path", ""])
+            for line in trace.read_text(encoding="utf-8").splitlines():
+                event = json.loads(line)
+                if event.get("event") == "agent.decision":
+                    lines.append(f"- {event['agent_id']}: {event['action']} — {event.get('rationale', '')}")
         dest = ctx.root / "report/report.md"
         dest.write_text(redact("\n".join(lines)) + "\n", encoding="utf-8")
         return dest

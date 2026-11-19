@@ -25,9 +25,26 @@ class Captain:
     def plan(self, skill):
         return skill.plan()
 
+    def run(self, executor, *, authorized=False, host=None, client=None, phases=None, max_workers=4):
+        import os
+        if client is not None or os.environ.get("DEEPSEEK_API_KEY"):
+            from .agents import AgentCampaign
+            return AgentCampaign(executor.ctx, executor.skill, client=client, authorized=authorized,
+                                 host=host, phases=phases, max_workers=max_workers).run()
+        executor.ctx.config["engine"] = "deterministic"
+        if phases and len(phases) == 1 and phases[0]["id"] == "http-probe" and executor.skill.name == "recon":
+            return executor.thin_slice()
+        return executor.campaign_run(phases or self.plan(executor.skill), authorized=authorized, host=host)
+
 
 class Triager:
-    def review(self, observation):
+    def __init__(self, llm=None):
+        self.llm = llm
+
+    def review(self, observation, evidence=None, agent_id="triager"):
+        if self.llm:
+            from .agents import AgentTriager
+            return AgentTriager(self.llm).review(observation, evidence or {}, agent_id)
         return {"state": "hypothesis", "rationale": "Independent verification required", "observation": observation}
 
 

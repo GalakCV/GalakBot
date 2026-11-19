@@ -1,0 +1,28 @@
+recon:
+  passive-enum: [subfinder, assetfinder, gau, waybackurls, curl]
+  active-discovery: [dnsx, dns-read]
+  http-probe: [httpx, http-read]
+  surface-mapping: [httpx, katana]
+web-testing:
+  access-control: [api-probe]
+  injection: [api-probe]
+  ssrf: []
+  xss: [api-probe]
+  file-upload: []
+  business-logic: [api-probe]
+api-testing:
+  spec-recon: [api-probe]
+  auth-enforcement: [api-probe]
+  bola: [api-probe]
+  bfla: [api-probe]
+  mass-assignment: []
+cloud:
+  asset-fingerprint: [dns-read, http-read]
+  bucket-exposure: [api-probe]
+  metadata-reach: []
+  misconfig: [api-probe]
+infra:
+  takeover: [dns-read, http-read]
+  exposed-services: [api-probe]
+  tls: [openssl]
+  dns: [dns-read]
