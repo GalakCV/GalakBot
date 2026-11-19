@@ -302,10 +302,8 @@ class Executor:
                        sys.executable, str(Path(__file__).with_name("python_worker.py")), str(script), *args]
         if self.tools.fixture is None:
             # Scripts cannot open sockets, read operator credentials, or write outside the run directory.
-            mounts = []
-            for path in ("/usr", "/bin", "/lib", "/lib64"):
-                if Path(path).exists():
-                    mounts += ["--ro-bind", path, path]
+            from .runtime import runtime_mounts
+            mounts = runtime_mounts()
             command = ["bwrap", "--unshare-all", "--die-with-parent", "--new-session", *mounts,
                        "--proc", "/proc", "--dev", "/dev", "--ro-bind", str(self.skill.root.parent), str(self.skill.root.parent),
                        "--ro-bind", str(bridge.parent), str(bridge.parent),

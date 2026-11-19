@@ -31,10 +31,8 @@ def dispatch(layer, request, agent_id):
     if layer.fixture is None:
         if sys.platform != "linux" or not shutil.which("bwrap"):
             raise Refused("Agent tools require Linux bubblewrap; no unsafe fallback")
-        mounts = []
-        for path in ("/usr", "/bin", "/lib", "/lib64"):
-            if Path(path).exists():
-                mounts += ["--ro-bind", path, path]
+        from .runtime import runtime_mounts
+        mounts = runtime_mounts()
         command = ["bwrap", "--unshare-all", "--die-with-parent", "--new-session", *mounts,
                    "--proc", "/proc", "--dev", "/dev", "--ro-bind", str(bridge.parent), str(bridge.parent),
                    "--bind", str(layer.ctx.root), str(layer.ctx.root), "--chdir", str(work), "--", *command]

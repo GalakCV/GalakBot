@@ -68,3 +68,13 @@ def test_snapshot_refuses_source_as_destination(workspace):
     source.mkdir()
     with pytest.raises(Refused, match="destination"):
         prepare_skill(source, source / "nested")
+
+
+def test_virtualenv_outside_system_prefix_is_available_to_sandbox(workspace, monkeypatch):
+    import sys
+    from bounty.runtime import runtime_mounts
+    venv = workspace / "isolated-venv"
+    venv.mkdir()
+    monkeypatch.setattr(sys, "prefix", str(venv))
+    mounts = runtime_mounts()
+    assert str(venv) in mounts
