@@ -240,3 +240,36 @@ def test_authorized_explore_worker_drives_intrusive_tool(ctx):
     AgentCampaign(ctx, skill, client=fake, authorized=True, host="api.example.com").run()
     assert ctx.config["status"] == "complete"
     assert '"tool": "api-probe"' in (ctx.root / "traces/events.jsonl").read_text()
+
+
+def test_live_adapter_preserves_validated_scheme_timeout_and_retry(ctx, monkeypatch):
+    configure(ctx)
+    layer = ToolLayer(ctx, Breaker(ctx))
+    layer.fixture = None
+    captured = []
+    def process(command, **kwargs):
+        captured.append((command, kwargs))
+        return SimpleNamespace(returncode=0, stdout='{"input":"api.example.com","status_code":200}\n')
+    monkeypatch.setattr("bounty.executor.subprocess.run", process)
+    layer.call(dict(tool="httpx", args=["-u", "http://api.example.com/", "-rl", "10", "-timeout", "3", "-retry", "3"]))
+    command = captured[0][0]
+    assert command[command.index("-u") + 1] == "http://api.example.com/"
+    assert command[command.index("-timeout") + 1] == "3"
+    assert command[command.index("-retries") + 1] == "3"
+    assert "DEEPSEEK_API_KEY" not in captured[0][1]["env"]
+
+
+def test_live_http_adapter_preserves_timeout_and_user_agent(ctx, monkeypatch):
+    configure(ctx)
+    ctx.config["explore_authorized"] = True
+    layer = ToolLayer(ctx, Breaker(ctx))
+    layer.fixture = None
+    layer.tier = "active-intrusive"
+    captured = []
+    def process(command, **kwargs):
+        captured.append((command, kwargs))
+        return SimpleNamespace(returncode=0, stdout='{"status":200,"headers":{},"body":"ok"}')
+    monkeypatch.setattr("bounty.plugins.subprocess.run", process)
+    layer.call(dict(tool="curl", args=["-sS", "-m", "3", "-A", "approved-agent", "https://api.example.com/health"]))
+    assert captured[0][0][-1] == "approved-agent"
+    assert captured[0][1]["timeout"] == 3

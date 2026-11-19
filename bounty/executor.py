@@ -212,7 +212,10 @@ class ToolLayer:
                     self.breaker.outcome(False)
                     continue
             else:
-                cmd = [shutil.which("httpx"), "-u", "https://" + host + "/", "-silent", "-json",
+                chosen_url = options.get("-u", "")
+                if "://" not in chosen_url:
+                    chosen_url = "https://" + host + "/"
+                cmd = [shutil.which("httpx"), "-u", chosen_url, "-silent", "-json",
                        "-sc", "-title", "-td", "-location", "-webserver", "-no-color", "-no-fallback",
                        "-t", options.get("-t", "1"), "-timeout", options.get("-timeout", "10"),
                        "-retries", options.get("-retry", options.get("-retries", "1")), "-rl", options.get("-rl", "1"), "-disable-update-check"]

@@ -86,7 +86,9 @@ def _value(layer, tool, flag, value, kind):
             if int(value) > layer.ctx.config["rates"][category]:
                 raise InvalidArguments(f"{flag} exceeds the run's {category} rate limit")
     elif kind in {"host", "url"}:
-        layer.scope.require(value, layer.breaker)
+        normalized = layer.scope.require(value, layer.breaker)
+        if kind == "host":
+            return normalized
         if kind == "url":
             url = urlsplit(value if "://" in value else "https://" + value)
             if url.scheme not in {"http", "https"} or url.port not in {None, 80, 443}:

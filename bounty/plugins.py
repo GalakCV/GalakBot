@@ -98,13 +98,15 @@ def register_tools(layer):
                 layer.breaker.trip("Unsupported curl argument")
         if "-o" in options and options["-o"] not in {"/dev/null", "nul", "NUL"}:
             layer.breaker.trip("curl output path not permitted")
-        record = read_http(url, ct_seed=seed if ct else None)
+        record = read_http(url, ct_seed=seed if ct else None,
+                           timeout=int(options.get("-m", options.get("--max-time", 12))),
+                           user_agent=options.get("-A", "BountyHarness/0.1"))
         output = record.get("body", "") if "-o" not in options else ""
         if "-w" in options:
             output += options["-w"].replace("%{http_code}", str(record["status"])).replace("%{size_download}", str(len(record.get("body", ""))))
         return dict(code=0, stdout=output)
 
-    def read_http(url, ct_seed=None):
+    def read_http(url, ct_seed=None, timeout=12, user_agent="BountyHarness/0.1"):
         from .core import redact
         parsed = urlsplit(url)
         if parsed.scheme not in {"http", "https"} or parsed.username or parsed.password or parsed.port not in {None, 80, 443}:
@@ -126,9 +128,10 @@ def register_tools(layer):
                 record = {"status": 200, "body": json.dumps([{"name_value": ct_seed}]), "headers": {}}
         else:
             try:
-                result = subprocess.run([sys.executable, str(Path(__file__).with_name("http_fetch.py")), url],
+                deadline = min(timeout, max(0.01, layer.remaining()))
+                result = subprocess.run([sys.executable, str(Path(__file__).with_name("http_fetch.py")), url, str(deadline), user_agent],
                                         stdin=subprocess.DEVNULL, capture_output=True, text=True,
-                                        timeout=min(12, max(0.01, layer.remaining())), env=layer.clean_env(), cwd=layer.ctx.root)
+                                        timeout=deadline, env=layer.clean_env(), cwd=layer.ctx.root)
                 if result.returncode:
                     raise OSError("HTTP read failed")
                 record = json.loads(result.stdout)
@@ -206,7 +209,7 @@ def register_tools(layer):
                 if url in seen:
                     continue
                 seen.add(url)
-                result = read_http(url)
+                result = read_http(url, timeout=int(config.get("-timeout", 12)))
                 rows.append(dict(url=url, status=result["status"]))
                 if depth < int(config.get("-d", 1)):
                     parser = Links()
